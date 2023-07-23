@@ -1,0 +1,869 @@
+---
+title: "Topological Data Analysis Assisted Forecasting Algorithm"
+author:
+  - Jesús Francisco Espinoza Fierro, Universidad de Sonora, jesusfrancisco.espinoza@unison.mx
+  - Pedro Andrés Hernández Amador, Universidad de Sonora, rosalia.hernandez@unison.mx
+  - Rosalía Guadalupe Hernández Amador, Universidad de Sonora, pedro.a.hdez.a@gmail.com
+output: 
+  html_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+A Topological Data Analysis Assisted Dichotomous Forecast will be defined for a time series $X$ based on the identification of a pattern associated with the window $w \subset X$ which includes the last value of $X$. Specifically, an increase of 2% in the price of a Symbol (cryptocurrency) in USDT (Thethers - Equivalent cryptocurrency of the US dollar) will be forecasted before a decrease of the same percentage happens, if the "majority" of the time windows that are "similar" to $w$ had a correct prediction.
+
+**Notation**: Let $Γ(ℓ,X)$ be the set of all the time windows of length $ℓ$ contained in the time series $X$
+
+**Definition**: Let $ν$,$\tilde{\nu}∈Γ(ℓ,X)$. Then, we denote as $W_1(ν,\tilde{\nu})$ the 1-Wasserstein Distance between the persistence diagrams of the Vietoris-Rips filtrations associated to the Takens Embedding of the time windows $ν$ and $\tilde{\nu}$ in $\mathbb{R}^2$. We define:
+
+$$W_1(ν,Γ(ℓ,X)):={W_1(ν,\tilde\nu)∣\tilde\nu∈Γ(ℓ,X),\tilde\nu≠ν}$$
+
+Given the time window $ν∈Γ(ℓ,X)$, we say that another time window $\tilde\nu∈Γ(ℓ,X)$ is **q-close** to $ν$ in $Γ(ℓ,X)$, if $W_1(ν,\tilde\nu)$ is located within the percentile $q$ of the set $W_1(ν,Γ(ℓ,X))$.
+
+# Dependencies
+
+First, a check is done over the needed packages. If there are some of them that are not installed, then it will proceed to download. Finally, they will be imported.
+
+```{r message=F}
+# List of needed packages
+packages = c("binancer", "dplyr", "plotly", "lubridate", "tidyverse", "xts", "magrittr", "parallel", "TDA", "tibbletime")
+
+# The check is performed and the missing packages are downloaded
+not_installed = packages[!(packages %in% installed.packages()[ , "Package"])]
+if(length(not_installed)) install.packages(not_installed)
+
+# We import all the libraries
+library(binancer)
+library(dplyr)
+library(plotly)
+library(lubridate)
+library(tidyverse)
+library(xts)
+library(magrittr)
+library(parallel)
+library(TDA)
+library(tibbletime)
+```
+
+# Experiment Feasibility Analysis
+
+The parameters of the experiment are checked in order to know if the experiment is possible according to the number of needed Japanese candles and the number of candles that the Binance API could provide us with.
+
+The parameters that we need to provide in order to check if the experiment is feasible are:
+
+-   `beginDate`: Timestamp from when the data will be retreived
+-   `extra_candles`: Number of extra candles to determine the trend after the last windows $v$
+-   `NumWindows_w`: Number of
+
+```{r, eval=F}
+# Archivo en donde se almacenarán los resultados
+results_file ='data/exp9_finalV3.csv'
+
+# Fechas de inicio de recolección de los datos
+beginDate = as.POSIXct('2018-01-01 00:00:00')
+
+# Numero excedente de velas para poder determinar la tendencia despues de las
+# ultimas ventanas Nu
+extra_candles = 2880 # dos dias
+
+NumWindows_w = 10000 # Num. de ventanas W
+windowLength = 60 # Tam, de las ventanas
+rollingStep_window = 30 # Tam. del desliz
+
+# Se calcula el número de velas necesarias para realizar el experimento una
+# sola vez
+NCandlesOneIter = 2*windowLength + rollingStep_window*(NumWindows_w-1)
+
+NumIters = 1000 # Num. de veces a repetir el experimento
+rollingStep_iter = 60 # Tam. del desliz de la hiperventana del experimento
+
+# Se calcula el numero de velas necesarias para realizar el experimento
+# NV_e veces a pasos de tamano TP_e mas el excedente
+NCandlesTotal = NCandlesOneIter + rollingStep_iter*(NumIters - 1) + extra_candles
+
+
+thresh_pronostico = .5
+
+print(paste('Num. de ventanas W:', N_w))
+print(paste('Tam. de las ventanas:', size_w))
+print(paste('Tam. del desliz de las ventanas:',Rs_v))
+print(paste('Num. de veces a repetir el experimento:',NV_e))
+print(paste('Tam. del desliz de la hiperventana del experimento:',TP_e))
+print(paste('Para realizar el experimento una sola vez se necesitan',NP_1,'velas'))
+print(
+  paste(
+    'Para realizar el experimento',NV_e,'veces a pasos de tamano',TP_e,
+    'se necesitan',NP_t+excedente_velas,'velas (',NP_t,'+',excedente_velas,' extra)'
+  )
+)
+
+instanteActual = Sys.time()
+minutoActual = instanteActual - seconds(second(instanteActual))
+numMinDisponibles = interval(fInicio,minutoActual) / minutes(1)
+
+str = if(NP_t <= numMinDisponibles) 'POSIBLE' else 'IMPOSIBLE'
+
+
+print(
+  paste(
+    'Desde',fInicio,'hasta la actualidad',minutoActual,'transcurrieron',
+    numMinDisponibles,'Por lo tanto, la realizacion del experimento con los',
+    'parametros otorgados es',str
+  )
+)
+```
+
+# Funciones auxiliares
+
+Función para imprimir tiempos de ejecución
+
+```{r,eval=F}
+imprimirTiempoEjecucion = function(start, end){
+  intervalo = interval(start, end)
+  
+  print(
+    paste(
+      'Tiempo de ejecucion:',
+      intervalo/seconds(1), 'segundos;',
+      intervalo/minutes(1), 'minutos;',
+      intervalo/hours(1), 'horas'
+    )
+  )
+}
+```
+
+Función para construir una barra de progreso
+
+```{r,eval=F}
+construirBarraProgreso = function(min, max){
+  pb <- txtProgressBar(
+    min = min,      # Minimum value of the progress bar
+    max = max,    # Maximum value of the progress bar
+    style = 3,     # Progress bar style (also available style = 1 and style = 2)
+    width = 50,    # Progress bar width. Defaults to getOption("width")
+    char = "="     # Character used to create the bar
+  )
+  
+  return(pb)
+}
+```
+
+Función auxiliar para descargar más de 1000 velas japonesas:
+
+```{r,eval=F}
+binance_klines_extended <- function(symbol = "BTCUSDT",
+                                    interval = "1m",
+                                    limit){
+  mod <- 1000 # Maximo de ventanas permitidas por descarga.
+  q <- limit %/% mod
+  r <- limit %% mod
+  if(r == 0){
+    q <- q - 1
+    r <- mod
+  }
+  candles <- binance_klines(symbol, interval, limit = r)
+  if(q == 0) return(candles)
+  
+  for(i in 1:q){
+    candles %<>% rbind(binance_klines(symbol,
+                                      interval,
+                                      limit = mod,
+                                      end_time = candles$open_time[1] - 60),
+                       .)
+  }
+  return(candles)
+}
+```
+
+Funcion para crear ventanas de tiempo
+
+```{r,eval=F}
+W.gen <- function(idx_inicio,
+                  idx_fin,
+                  time.series = candles.tbl){
+  return(time.series[idx_inicio:idx_fin, ])
+  }
+```
+
+Función que recibe una ventana de tiempo y calcula la homología persistente asociada
+
+```{r,eval=F}
+W.perHom = function(W, maxdimension = 1, maxscale = 10, dim.takens = 2){
+  W %>%
+    embed(dimension = dim.takens) %>%
+    ripsDiag(maxdimension = maxdimension, maxscale = maxscale) %>%
+    .[["diagram"]] %>%
+    return()
+}
+```
+
+Función para determinar si el precio subió o bajó después de una ventana dada
+
+```{r,eval=F}
+win.classifier <- function(idx_finW,
+                           threshold.sup = 0.02,
+                           threshold.inf = 0.02,
+                           time.series = candles.tbl,
+                           num_velas = num_total_velas){
+  
+  reference.price = time.series[idx_finW,]$close
+  
+  winners_losers <- time.series[((idx_finW+1):num_velas), ] %>%
+    mutate(index = index(.),
+           winner = (high >= reference.price * (1 + threshold.sup)), 
+           loser = (low <= reference.price * (1 - threshold.inf)),
+           .keep = "none") %>%
+    filter(winner | loser) %>%
+    head(1)
+  
+  if(nrow(winners_losers) == 0) return(0)
+  if(winners_losers$winner == TRUE){
+    return(1)
+    }else{
+      return(-1)
+    }
+  }
+```
+
+# Obtención de los datos
+
+Se descargan las velas japoneas utilizando la API de Binance y se les da un formato de tabla
+
+```{r,eval=F}
+start_app = Sys.time()
+candles <- binance_klines_extended(symbol = "BTCUSDT",
+                                   interval = "1m",
+                                   limit = NP_t+excedente_velas)
+
+imprimirTiempoEjecucion(start_app, Sys.time())
+
+```
+
+```{r,eval=F}
+candles.tbl <- candles %>%
+  select(open_time, open, high, low, close, close_time) %>%
+  as_tbl_time(index = open_time)
+
+first_date = head(candles.tbl$open_time, 1)
+```
+
+# Pronóstico
+
+Para la realización de los pronósticos se paraleliza cada uno de los pasos
+
+## 1. Se generan todas las ventanas $ν∈Γ(ℓ,X)$ y $w$ que se necesitarán
+
+```{r, eval=F}
+no_cores <- detectCores()
+print(no_cores)
+cl <- makeCluster(no_cores)
+
+clusterExport(
+  cl, 
+  c("TP_e", "TP", "TV", "W.gen", "%>%", "candles.tbl")
+)
+
+clusterEvalQ(
+  cl, 
+  {
+    library(tibbletime)
+  }
+)
+```
+
+```{r,eval=F}
+# Dataframe para almacenar los indices de inicio y fin de cada ventana W
+df_indicesW = data.frame(
+  inicio = numeric(),
+  fin = numeric()
+)
+
+# Listas para almacenar los diagramas de persistencia y la tendenca futura real
+# de cada ventana Nu
+diagPersNu = list()
+futurosNu = list()
+
+
+pb = construirBarraProgreso(0,NV_e)
+
+nExp = 0
+start = Sys.time()
+while(nExp < NV_e){
+  
+  # ------------- ESTE PASO TAMBIEN SE PODRIA PARALELIZAR TAL VEZ -------------
+  
+  # Se calculan los indices de inicio y fin de la ventana Nu para calcular su
+  # diagrama de persistencia y su futuro real
+  inicioV = (nExp*TP_e)+(NP_1 - TV) + 1
+  finV= inicioV + (TV - 1)
+  
+  diagPersNu[[(nExp+1)]] = W.perHom(W.gen(inicioV, finV)$close)
+  futurosNu[[(nExp+1)]] = win.classifier(finV)[1]
+  
+  # ---------------------------------------------------------------------------
+  
+  # Se calcula cada ventana W asociada a la ventana Nu actual
+  df_indicesW_tmp = as.data.frame(
+    do.call(
+      rbind,
+      parLapply(
+        cl,
+        0:(NV-1),
+        function(numVent, nExp, df_indicesW){
+          # Se obtiene el inicio y el fin de la ventana W actual
+          inicioW = (nExp*TP_e) + (numVent*TP) + 1
+          finW = inicioW + (TV - 1)
+          
+          # Si los indices ya existen en el dataframe, entonces significa que ese
+          # diagrama de persistencia ya ha sido calculado
+          if( !any(df_indicesW$inicio == inicioW) ){
+            return(c(inicioW, finW))
+          }
+        },nExp,df_indicesW
+      )
+    )
+  )
+  
+  # Si se encontraron ventanas W nuevas, entonces se le da formato al dataframe
+  # resultante y se une con el dataframe de Ws
+  colnames(df_indicesW_tmp) = c('inicio', 'fin')
+  df_indicesW = rbind(df_indicesW, df_indicesW_tmp)
+  
+  nExp = nExp + 1
+  setTxtProgressBar(pb, nExp)
+}
+
+end = Sys.time()
+close(pb)
+stopCluster(cl)
+
+imprimirTiempoEjecucion(start, end)
+```
+
+## 2. Se detemina el futuro de cada ventana $w$, es decir, si el precio subió o bajó.
+
+```{r,eval=F}
+cl <- makeCluster(no_cores)
+
+clusterExport(
+  cl, 
+  c( 
+    "win.classifier", "candles.tbl", "%>%", "num_total_velas", "index"
+   )
+)
+
+clusterEvalQ(
+  cl, 
+  {
+    library(dplyr)
+  }
+)
+
+```
+
+```{r,eval=F}
+start = Sys.time()
+futurosWs = parSapply(
+  cl,
+  df_indicesW$fin,
+  function(idx_finW){
+    win.classifier(idx_finW)
+  }
+)
+end = Sys.time()
+
+# El futuro de cada ventana W se añade al dataframe de sus indices
+df_indicesW = df_indicesW %>% 
+  mutate(futuro=futurosWs)
+
+stopCluster(cl)
+imprimirTiempoEjecucion(start,end)
+```
+
+## 3. Se calculan los diagramas de persistencia de todas las ventanas $w$
+
+```{r,eval=F}
+print(no_cores)
+cl <- makeCluster(no_cores)
+
+clusterExport(
+  cl, 
+  c("candles.tbl", "df_indicesW", "W.perHom", "W.gen", "%>%")
+)
+
+
+clusterEvalQ(
+  cl, 
+  {
+    library(TDA)
+    library(tibbletime)
+  }
+)
+```
+
+```{r,eval=F}
+start = Sys.time()
+homPersW = parLapply(
+    cl,
+    1:nrow(df_indicesW),
+    function(idx){
+      return(
+        W.gen(
+          idx_inicio=df_indicesW[idx, 'inicio'],
+          idx_fin=df_indicesW[idx, 'fin']
+        )$close %>% W.perHom()
+      )
+    }
+)
+imprimirTiempoEjecucion(start, Sys.time())
+
+stopCluster(cl)
+```
+
+## 4. Se calculan las distancias de Wasserstein de los diagramas de persistencia de cada ventana $ν∈Γ(ℓ,X)$ y sus correspondientes ventanas $w$
+
+```{r,eval=F}
+cl <- makeCluster(no_cores)
+
+clusterExport(
+  cl, 
+  c( 
+    "TP","TP_e", "TV", "homPersW","df_indicesW"
+   )
+)
+
+clusterEvalQ(
+  cl, 
+  {
+    library(TDA)
+    library(dplyr)
+  }
+)
+```
+
+```{r,eval=F}
+distanciasVaW = list()
+pb = construirBarraProgreso(0, NV_e)
+
+nExp = 0
+start = Sys.time()
+while(nExp < NV_e){
+  # Se toma el diagrama de persistencia de la ventana Nu actual
+  diagV = diagPersNu[[(nExp+1)]]
+  
+  # Se paraleliza el proceso de tomar las distancias de Wasserstein del diagrama
+  # de persistencia de las ventanas W con el diagrama de persistencia de Nu
+  distanciasVaW[[(nExp+1)]] = as.data.frame(
+    do.call(
+      rbind,
+      parLapply(
+        cl,
+        0:(NV-1),
+        function(numVent,nExp,diagV){
+          finW = (nExp*TP_e) + (numVent*TP) + TV
+          return(
+              c(
+                finW, 
+                wasserstein(homPersW[[which(df_indicesW$fin==finW)]],diagV)
+              )
+            )
+        },nExp,diagV
+      )
+    )
+  )
+  
+  nExp = nExp + 1
+  
+  setTxtProgressBar(pb, nExp)
+}
+close(pb)
+stopCluster(cl)
+imprimirTiempoEjecucion(start, Sys.time())
+```
+
+## 5. Se realiza el pronóstico
+
+Primero, se obtienen todas las ventanas de tiempo en $Γ(ℓ,X)$ que son 0.05-cercanas a $ν$. Este conjunto de ventanas se denota por $ν_{0.05}$.
+
+Luego, se determina la proporción $π(ν0.05)$ de ventanas en $ν_{0.05}$ que tuvieron un aumento (resp. descenso) del 2% antes que un descenso (resp. aumento) en el mismo porcentaje, del USDT-precio del símbolo con respecto al último precio en dicha ventana.
+
+Finalmente, se pronostica un aumento (resp. descenso) del 2% antes que un descenso (resp. aumento) en el mismo porcentaje para la ventana $w$, si $π(ν_{0.05})≥threshold$.
+
+```{r,eval=F}
+cl <- makeCluster(no_cores)
+
+clusterExport(
+  cl, 
+  c( 
+    "thresh_pronostico", "futurosNu", "distanciasVaW", "df_indicesW"
+   )
+)
+
+```
+
+```{r,eval=F}
+
+start = Sys.time()
+df_resultados = as.data.frame(
+  do.call(
+    rbind,
+    parLapply(
+      cl,
+      1:NV_e,
+      function(idx_V){
+        
+        v.dist = distanciasVaW[[(idx_V)]]
+        v.similar = which(v.dist$V2 <= quantile(v.dist$V2, probs = 0.05))
+        idx_WsSimilares = which(df_indicesW$fin%in%v.dist[v.similar,]$V1)
+        
+        futurosW = df_indicesW[idx_WsSimilares,]$futuro
+        
+        if(mean(futurosW == 1) >= thresh_pronostico) return(c(futurosNu[[idx_V]],1))
+        else if (mean(futurosW == -1) >= thresh_pronostico) return(c(futurosNu[[idx_V]],-1))
+        else return(c(futurosNu[[idx_V]],0))
+      }
+    )
+  )
+)
+end = Sys.time()
+stopCluster(cl)
+
+imprimirTiempoEjecucion(start, end)
+```
+
+Al final se imprimen y almacenan los resultados
+
+```{r,eval=F}
+
+write.csv(
+  df_resultados,
+  file_resultados,
+  row.names = FALSE
+)
+
+n_experimentos = nrow(df_resultados)
+n_indet = nrow(df_resultados%>%filter(V2 == 0))
+n_real_indet = nrow(df_resultados%>%filter(V1 == 0))
+
+df_resultados = df_resultados%>%filter(V1 != 0 & V2 != 0)
+n_aciertos = nrow(df_resultados%>%filter(V1==V2))
+n_exp_ajustado = nrow(df_resultados)
+
+print(paste('Num. total de experimentos:', n_experimentos))
+print(paste('Aciertos:', n_aciertos))
+print(paste('pronosticos indeterminados:',n_indet))
+print(paste('tendencias reales indeterminadas:',n_real_indet))
+print(paste('Accuracy', (n_aciertos/n_exp_ajustado)*100, '%'))
+
+imprimirTiempoEjecucion(start_app, Sys.time())
+```
+
+# Tabla de resultados
+
+| ID_Exp | Num. De<br>ventanas w | Tam. De<br>las ventanas | Tam. del desliz de<br>las ventanas v | Num. Velas<br>una iter. | Num.<br>iters | Tam. desliz de la<br>hiperventana del<br>experimento | Num. Velas<br>totales | Num.<br>Ventanas<br> v | Num.<br>Ventanas<br>w | Thresh.<br>pronóstico | Num. Aciertos | Pronósticos<br>indeterminados | Tendencias<br>reales<br>indeterminadas | Accuracy | Tiempo de<br>descarga de<br>las velas | Tiempo para<br>calcular todas<br>las ventanas v (diag. pers. Y futuro) y w | Tiempo para<br>determinar<br>el futuro de<br>cada ventana W | Tiempo para<br>calcular los diag.<br>de pers. De<br>todas las<br>ventanas v y w | Tiempo para<br>calcular las dist.<br>De Wasserstein<br>de cada ventana v<br>y sus correspondientes<br>ventanas w | Tiempo para<br>ejecutar los<br>pronósticos | Tiempo ejecucion<br>total |
+|--------|-----------------------|-------------------------|--------------------------------------|-------------------------|---------------|------------------------------------------------------|-----------------------|------------------------|-----------------------|-----------------------|---------------|-------------------------------|----------------------------------------|----------|---------------------------------------|----------------------------------------------------------------------------|-------------------------------------------------------------|---------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|--------------------------------------------|---------------------------|
+| 1      | 10,000                | 240                     | 48                                   | 480,432                 | 1000          | 60                                                   | 543,252               | 1000                   | 44980                 | 0.5                   | 572           | 0                             | 4                                      | 57.42%   | 2.66 min                              | 3.81 min                                                                   | 59.31 seg                                                   | 48.56 seg.                                                                      | 29.8 min                                                                                                         | .42 seg                                    | 40.02 min                 |
+| 2      | 10,000                | 60                      | 30                                   | 300,090                 | 1000          | 60                                                   | 362,910               | 1000                   | 11,998                | 0.5                   | 562           | 0                             | 0                                      | 56.2%    | 1.48 min                              | 2.38 min                                                                   | 13.78 seg                                                   | .94 seg                                                                         | 2.75 min                                                                                                         | .34 seg                                    | 8.21 min                  |
+| 3      | 1,000                 | 480                     | 480                                  | 480,480                 | 1000          | 480                                                  | 962,880               | 1000                   | 1999                  | 0.5                   | 513           | 0                             | 1                                      | 51.35%   | 4.14 min                              | 1.67 min                                                                   | 7.08 seg                                                    | 6.01 seg                                                                        | 18.22 min                                                                                                        | .26 seg                                    | 25.56 min                 |
+| 4      | 10,000                | 480                     | 30                                   | 300,930                 | 1000          | 60                                                   | 363,750               | 1000                   | 11,998                | 0.5                   | 559           | 0                             | 11                                     | 56.56%   | 1.8 min                               | 4.08 min                                                                   | 16.67 seg                                                   | 1.19 min                                                                        | 8.71 hrs                                                                                                         | .32 seg                                    | 8.86 hrs                  |
+| 5      | 30,000                | 480                     | 60                                   | 1,800,900               | 1000          | 60                                                   | 1,863,720             | 1000                   | 30,999                | 0.5                   | 449           | 0                             | 0                                      | 44.9%    | 11.27 min                             | 8 min                                                                      | 2.43 min                                                    | 9.22 min                                                                        | 31.95 hrs                                                                                                        | .38 seg                                    | 32.52 hrs                 |
+| 6      | 30,000                | 480                     | 30                                   | 900,930                 | 1000          | 60                                                   | 963,750               | 1,000                  | 31,998                | 0.8                   | 0             | 1,000                         | 0                                      | 0%       | 5.28 min                              | 7.51 min                                                                   | 1.28 min                                                    | 1.62 min                                                                        | 24.04 hrs                                                                                                        | .34 seg                                    | 24.35 hrs                 |
+| 7      | 30,000                | 480                     | 30                                   | 900,930                 | 1000          | 60                                                   | 963,750               | 1,000                  | 31,998                | .5                    | 537           | 0                             | 0                                      | 53.7%    | 5.28 min                              | 7.51 min                                                                   | 1.28 min                                                    | 1.62 min                                                                        | 24.04 hrs                                                                                                        | .34 seg                                    | 24.35 hrs                 |
+
+Experimento 2 HECHO
+
+-   NV = 10000 \# Num. de ventanas W
+
+-   TV = 240 \# Tam, de las ventanas
+
+-   TP = 48 \# Tam. del desliz
+
+-   NP_1 = 480432 \# número de velas necesarias para realizar el experimento una sola vez
+
+-   NV_e = 1000 \# Num. de veces a repetir el experimento
+
+-   TP_e = 60 \# Tam. del desliz de la hiperventana del experimento
+
+-   NP_t = 543252 numero de velas necesarias para realizar el experimento completo (2880 extra)
+
+-   thresh. pronostico = .5
+
+-   Aciertos: 572
+
+-   pronosticos indeterminados: 0
+
+-   Tendencias reales indeterminadas: 4
+
+-   Accuracy: 57.42%
+
+0.  Tiempo para descargar las 543252 velas: 2.66 minutos
+1.  Tiempo para calcular todas las ventanas V (1000, HomPers y futuro) y W (44980): 3.81 minutos
+2.  Tiempo para determinar el futuro de cada ventana W: 59.31 segundos
+3.  Tiempo para calcular los diagramas de persistencia de todas las ventanas W : 48.56 segundos
+4.  tiempo para calular las distancias de Wasserstein de los diagramas de persistencia de cada ventana V y sus correspondientes ventanas W: 29.8 minutos
+5.  Tiempo para ejecutar los pronosticos: .42 segundos
+
+-   Tiempo de ejecución total: 40.02 minutos
+
+------------------------------------------------------------------------
+
+Experimento 3 HECHO
+
+-   NV = 10000 \# Num. de ventanas W
+
+-   TV = 60 \# Tam, de las ventanas
+
+-   TP = 30 \# Tam. del desliz
+
+-   NP_1 = 300090 \# número de velas necesarias para realizar el experimento una sola vez
+
+-   NV_e = 1000 \# Num. de veces a repetir el experimento
+
+-   TP_e = 60 \# Tam. del desliz de la hiperventana del experimento
+
+-   NP_t = 362910 numero de velas necesarias para realizar el experimento completo (2880 extra)
+
+-   thresh. pronostico = .5
+
+-   Aciertos: 562
+
+-   pronosticos indeterminados: 0
+
+-   Tendencias reales indeterminadas: 0
+
+-   Accuracy: 56.2%
+
+0.  Tiempo para descargar las 362910 velas: 1.48 minutos
+1.  Tiempo para calcular todas las ventanas V (1000, HomPers y futuro) y W (11998): 2.38 minutos
+2.  Tiempo para determinar el futuro de cada ventana W: 13.78 segundos
+3.  Tiempo para calcular los diagramas de persistencia de todas las ventanas W: .94 segundos
+4.  tiempo para calular las distancias de Wasserstein de los diagramas de persistencia de cada ventana V y sus correspondientes ventanas W: 2.75 minutos
+5.  Tiempo para ejecutar los pronosticos: .34 segundos
+
+-   Tiempo de ejecucion total: 8.21 minutos
+
+------------------------------------------------------------------------
+
+Experimento 4 (igual que el 6 de la V4) HECHO
+
+-   NV = 1000 \# Num. de ventanas W
+
+-   TV = 480 \# Tam, de las ventanas
+
+-   TP = 480 \# Tam. del desliz
+
+-   NP_1 = 480480 \# número de velas necesarias para realizar el experimento una sola vez
+
+-   NV_e = 1000 \# Num. de veces a repetir el experimento
+
+-   TP_e = 480 \# Tam. del desliz de la hiperventana del experimento
+
+-   NP_t = 962880 numero de velas necesarias para realizar el experimento completo (2880 extra)
+
+-   thresh. pronostico = .5
+
+-   Aciertos: 512 vs 513
+
+-   pronosticos indeterminados: 0 vs 0
+
+-   Tendencias reales indeterminadas: 1 vs 1
+
+-   Accuracy: 51.25% vs 51.35%
+
+0.  Tiempo para descargar las 962880 velas: 4.14 minutos
+1.  Tiempo para calcular todas las ventanas V (1000, HomPers y futuro) y W (1999): 1.67 minutos
+2.  Tiempo para determinar el futuro de cada ventana W: 7.08 segundos
+3.  Tiempo para calcular los diagramas de persistencia de todas las ventanas W: 6.01 segundos
+4.  tiempo para calular las distancias de Wasserstein de los diagramas de persistencia de cada ventana V y sus correspondientes ventanas W: 18.22 minutos
+5.  Tiempo para ejecutar los pronosticos: 0.26 segundos
+
+-   Tiempo de ejecucion total: 32 minutos vs 29.77 minutos vs 25.56 minutos
+
+------------------------------------------------------------------------
+
+Experimento 5 (mismo que el 5 en V4) HECHO
+
+-   NV = 10000 \# Num. de ventanas W
+
+-   TV = 480 \# Tam, de las ventanas
+
+-   TP = 30 \# Tam. del desliz
+
+-   NP_1 = 300930 \# número de velas necesarias para realizar el experimento una sola vez
+
+-   NV_e = 1000 \# Num. de veces a repetir el experimento
+
+-   TP_e = 60 \# Tam. del desliz de la hiperventana del experimento
+
+-   NP_t = 363750 velas necesarias para realizar el experimento completo (2880 excedentes)
+
+-   thresh. pronostico = .5
+
+-   Aciertos: 527 vs 559
+
+-   pronosticos indeterminados: 0
+
+-   Tendencias reales indeterminadas: 11
+
+-   Accuracy: 52.7% vs 56.52%
+
+0.  Tiempo para descargar las 363750 velas: 1.8 minutos
+1.  Tiempo para calcular todas las ventanas V (1000, HomPers y futuro) y W (11998): 4.08
+2.  Tiempo para determinar el futuro de cada ventana W: 16.67 segundos
+3.  Tiempo para calcular los diagramas de persistencia de todas las ventanas W: 1.19 minutos
+4.  tiempo para calular las distancias de Wasserstein de los diagramas de persistencia de cada ventana V y sus correspondientes ventanas W: 8.71 horas
+5.  Tiempo para ejecutar los pronosticos: .32 segundos
+
+-   Tiempo de ejecucion total: 8.94 horas vs 8.86 horas
+
+------------------------------------------------------------------------
+
+Experimento 6 HECHO
+
+-   NV = 30000 \# Num. de ventanas W
+
+-   TV = 480 \# Tam, de las ventanas
+
+-   TP = 60 \# Tam. del desliz
+
+-   NP_1 = 1800900 \# número de velas necesarias para realizar el experimento una sola vez
+
+-   NV_e = 1000 \# Num. de veces a repetir el experimento
+
+-   TP_e = 60 \# Tam. del desliz de la hiperventana del experimento
+
+-   NP_t = 1863720 numero de velas necesarias para realizar el experimento completo (2880 extra)
+
+-   thresh. pronostico = .5
+
+-   Aciertos: 449
+
+-   pronosticos indeterminados: 0
+
+-   Tendencias reales indeterminadas: 0
+
+-   Accuracy: 44.9%
+
+0.  Tiempo para descargar las 1863720 velas: 11.27 minutos
+1.  Tiempo para calcular todas las ventanas V (1000, HomPers y futuro) y W (30999): 8 minutos
+2.  Tiempo para determinar el futuro de cada ventana W: 2.43 minutos
+3.  Tiempo para calcular los diagramas de persistencia de todas las ventanas W: 9.22 minutos
+4.  tiempo para calular las distancias de Wasserstein de los diagramas de persistencia de cada ventana V y sus correspondientes ventanas W: 31.95 horas
+5.  Tiempo para ejecutar los pronosticos: 0.38 segundos
+
+-   Tiempo de ejecucion total: 32.52 horas
+
+------------------------------------------------------------------------
+
+Experimento 7 HECHO
+
+-   NV = 30000 \# Num. de ventanas W
+
+-   TV = 480 \# Tam, de las ventanas
+
+-   TP = 30 \# Tam. del desliz
+
+-   NP_1 = 900930 \# número de velas necesarias para realizar el experimento una sola vez
+
+-   NV_e = 1000 \# Num. de veces a repetir el experimento
+
+-   TP_e = 60 \# Tam. del desliz de la hiperventana del experimento
+
+-   NP_t = 963750 velas necesarias para realizar el experimento completo (2880 excedentes)
+
+-   thresh. pronostico = .8
+
+-   Aciertos: 0
+
+-   pronosticos indeterminados: 1000
+
+-   Tendencias reales indeterminadas: 0
+
+-   Accuracy: NaN
+
+0.  Tiempo para descargar las 963750 velas: 5.28 minutos
+1.  Tiempo para calcular todas las ventanas V (1000, HomPers y futuro) y W (31998): 7.51 minutos
+2.  Tiempo para determinar el futuro de cada ventana W: 1.28 minutos
+3.  Tiempo para calcular los diagramas de persistencia de todas las ventanas W: 1.62 minutos
+4.  tiempo para calular las distancias de Wasserstein de los diagramas de persistencia de cada ventana V y sus correspondientes ventanas W: 24.04 horas
+5.  Tiempo para ejecutar los pronosticos: .34 segundos
+
+-   Tiempo de ejecucion total: 24.35 horas
+
+------------------------------------------------------------------------
+
+Experimento 8 (igual que el 7 con thresh mas bondadoso) HECHO
+
+-   NV = 30000 \# Num. de ventanas W
+
+-   TV = 480 \# Tam, de las ventanas
+
+-   TP = 30 \# Tam. del desliz
+
+-   NP_1 = 900930 \# número de velas necesarias para realizar el experimento una sola vez
+
+-   NV_e = 1000 \# Num. de veces a repetir el experimento
+
+-   TP_e = 60 \# Tam. del desliz de la hiperventana del experimento
+
+-   NP_t = 963750 velas necesarias para realizar el experimento completo (2880 excedentes)
+
+-   thresh. pronostico = .5
+
+-   Aciertos: 537
+
+-   pronosticos indeterminados: 0
+
+-   Tendencias reales indeterminadas: 0
+
+-   Accuracy: 53.7%
+
+0.  Tiempo para descargar las 963750 velas: 5.28 minutos
+1.  Tiempo para calcular todas las ventanas V (1000, HomPers y futuro) y W (31998): 7.51 minutos
+2.  Tiempo para determinar el futuro de cada ventana W: 1.28 minutos
+3.  Tiempo para calcular los diagramas de persistencia de todas las ventanas W: 1.62 minutos
+4.  tiempo para calular las distancias de Wasserstein de los diagramas de persistencia de cada ventana V y sus correspondientes ventanas W: 24.04 horas
+5.  Tiempo para ejecutar los pronosticos: .34 segundos
+
+-   Tiempo de ejecucion total: 24.35 horas
+
+------------------------------------------------------------------------
+
+Experimento 9 HACIENDOSE
+
+-   NV = 30000 \# Num. de ventanas W
+
+-   TV = 480 \# Tam, de las ventanas
+
+-   TP = 70 \# Tam. del desliz
+
+-   NP_1 = 2100890 \# número de velas necesarias para realizar el experimento una sola vez
+
+-   NV_e = 1000 \# Num. de veces a repetir el experimento
+
+-   TP_e = 120 \# Tam. del desliz de la hiperventana del experimento
+
+-   NP_t = 2223650 velas necesarias para realizar el experimento completo (2880 excedentes)
+
+-   thresh. pronostico = .5
+
+-   Aciertos:
+
+-   pronosticos indeterminados:
+
+-   Tendencias reales indeterminadas:
+
+-   Accuracy:
+
+0.  Tiempo para descargar las 963750 velas:
+1.  Tiempo para calcular todas las ventanas V (1000, HomPers y futuro) y W ():
+2.  Tiempo para determinar el futuro de cada ventana W:
+3.  Tiempo para calcular los diagramas de persistencia de todas las ventanas W:
+4.  tiempo para calular las distancias de Wasserstein de los diagramas de persistencia de cada ventana V y sus correspondientes ventanas W:
+5.  Tiempo para ejecutar los pronosticos:
+
+-   Tiempo de ejecucion total:
